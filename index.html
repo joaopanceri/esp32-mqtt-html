@@ -48,7 +48,7 @@
     <div class="meta" style="margin-top:8px">
       <span class="pill"><span class="led" id="led"></span><span id="st">Desconectado</span></span>
       &nbsp;•&nbsp; Duplo-clique no canvas: reset de zoom • Scroll: zoom sob o cursor • Arraste um círculo para reposicioná-lo
-      • <b>Inatividade &gt; 5s remove o círculo (com re-assinatura automática)</b>
+      • <b>Retidas têm carência de 20s</b> • Remoção por inatividade é dinâmica (3× intervalo médio, mín. 7s)
     </div>
 
     <canvas id="view" title="Scroll = zoom • Duplo-clique = reset"></canvas>
@@ -68,16 +68,18 @@
   const TOPIC_FILTER = "esp32/beacons/+/rssi_avg";
   const KEEPALIVE    = 60;
 
-  // ====== Mapeamento de RSSI → Raio (em UNIDADES DO MUNDO) ======
+  // ====== Mapeamento de RSSI → Raio (unidades do mundo) ======
   const RSSI_NEAR  = -30;
   const RSSI_FAR   = -100;
   const R_MIN_FRAC = 0.05;
   const R_MAX_FRAC = 0.18;
   const R_SMOOTH   = 0.15;
 
-  // ====== Inatividade ======
-  const STALE_MS = 5000;     // 5s sem mensagem -> remove
-  const RESUB_COOLDOWN = 2000; // 2s de cooldown para re-assinar
+  // ====== Inatividade (dinâmica) ======
+  const MIN_STALE_MS     = 7000;   // mínimo
+  const MAX_STALE_MS     = 60000;  // máximo de segurança
+  const STALE_FACTOR     = 3.0;    // N× intervalo médio
+  const RETAIN_GRACE_MS  = 20000;  // carência para mensagens só-retidas aguardarem um "vivo"
 
   // ====== Cena (world) e view (canvas) ======
   const canvas = document.getElementById('view');
@@ -93,11 +95,8 @@
   const world = { zoom: 1, minZoom: 0.3, maxZoom: 4, originX: 0, originY: 0 };
 
   // círculos por tópico (raios em mundo)
-  const circles = new Map(); // topic -> {x,y,rssi,rTarget,rCurrent,color,lastTs}
-
-  // debounce para re-subscribe
-  let lastResub = 0;
-  let resubPending = false;
+  // adiciona: avgInterval (EWMA), lastLiveTs, retainedAt, live flag
+  const circles = new Map(); // topic -> {x,y,rssi,rTarget,rCurrent,color,lastLiveTs,avgInt,retainedAt,live}
 
   function setStatus(text, ok=false){ stEl.textContent = text; ledEl.className = "led" + (ok ? " ok" : ""); }
 
@@ -124,7 +123,7 @@
   function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 
   function mapRSSItoRadius(rssi){
-    const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight); // baseline zoom=1
+    const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight);
     const rMin = R_MIN_FRAC * minSideScreen;
     const rMax = R_MAX_FRAC * minSideScreen;
     const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
@@ -199,39 +198,31 @@
   });
   window.addEventListener('mouseup', ()=>{ dragging=null; canvas.classList.remove('dragging'); });
 
-  // forçar reentrega de mensagens retidas: unsubscribe + subscribe (com debounce)
-  function resubscribeRetained() {
-    if (!client || !client.connected) return;
-    const now = Date.now();
-    if (now - lastResub < RESUB_COOLDOWN) {
-      // agenda uma única tentativa após cooldown
-      if (!resubPending) {
-        resubPending = true;
-        setTimeout(()=>{ resubPending=false; resubscribeRetained(); }, RESUB_COOLDOWN - (now - lastResub) + 10);
-      }
-      return;
-    }
-    lastResub = now;
-    client.unsubscribe(TOPIC_FILTER, () => {
-      client.subscribe(TOPIC_FILTER, { qos:0 }, (err)=>{
-        // opcional: status
-        if (!err) setStatus("Reassinado para recuperar retidas", true);
-      });
-    });
-  }
-
-  // render + limpeza
+  // render + limpeza estável
   function render(){
     const w=canvas.clientWidth, h=canvas.clientHeight;
     ctx.clearRect(0,0,w,h);
 
-    // remove inativos e, se removeu alguém, re-assina para receber retidos de volta
     const now=Date.now(), del=[];
-    for(const [topic,c] of circles){ if(now-c.lastTs>STALE_MS) del.push(topic); }
-    if (del.length) {
-      for(const t of del){ circles.delete(t); removeChip(t); }
-      resubscribeRetained();
+    for(const [topic,c] of circles){
+      // define limiar dinâmico
+      const avg = c.avgInt ?? MIN_STALE_MS;
+      const dyn = clamp(avg*STALE_FACTOR, MIN_STALE_MS, MAX_STALE_MS);
+
+      // se só temos retained (ainda sem "live"), segura por RETAIN_GRACE_MS
+      if (!c.live) {
+        if (c.retainedAt && (now - c.retainedAt) > RETAIN_GRACE_MS) {
+          del.push(topic);
+        }
+        continue; // não desenha? (opção) — aqui vamos desenhar mesmo assim:
+      } else {
+        if ((now - c.lastLiveTs) > dyn) {
+          del.push(topic);
+        }
+      }
     }
+    // remove os que passaram do limite
+    for(const t of del){ circles.delete(t); removeChip(t); }
 
     ctx.save();
     ctx.translate(w/2, h/2);
@@ -247,13 +238,13 @@
       ctx.arc(c.x, c.y, c.rCurrent, 0, Math.PI*2);
       ctx.fillStyle = c.color;        // semi-transparente
       ctx.fill();
-      ctx.lineWidth = 2/world.zoom;   // borda constante em px de tela
+      ctx.lineWidth = 2/world.zoom;   // borda em px
       ctx.strokeStyle = "rgba(255,255,255,0.15)";
       ctx.stroke();
 
       ctx.fillStyle = "rgba(229,231,235,0.9)";
       ctx.font = `${14/world.zoom}px system-ui,Segoe UI,Roboto,Arial`;
-      const label = `${topic.split('/').slice(-3,-1).join('/')} • ${c.rssi} dBm`;
+      const label = `${topic.split('/').slice(-3,-1).join('/')} • ${c.rssi} dBm` + (c.live ? "" : " (retido)");
       ctx.fillText(label, c.x + 10/world.zoom, c.y - 10/world.zoom);
     }
 
@@ -287,18 +278,45 @@
     try{ const o=JSON.parse(txt); if(typeof o==='number') return o; if(typeof o.rssi_avg==='number') return o.rssi_avg; }catch(e){}
     return null;
   }
+
   function onMsg(topic, payload, packet){
     const rssi=parsePayload(payload); if(rssi==null) return;
+    const isRetained = !!(packet && packet.retain);
+    const now = Date.now();
+
     let c=circles.get(topic);
     if(!c){
       const color=colorHSLA(topic);
       const pos=placeNewCircle(topic);
-      c={ x:pos.x, y:pos.y, rssi, rTarget:mapRSSItoRadius(rssi), rCurrent:2, color, lastTs:Date.now() };
+      c={
+        x:pos.x, y:pos.y,
+        rssi,
+        rTarget:mapRSSItoRadius(rssi),
+        rCurrent:2,
+        color,
+        live: !isRetained,
+        lastLiveTs: isRetained ? undefined : now,
+        retainedAt: isRetained ? now : undefined,
+        avgInt: undefined
+      };
       circles.set(topic,c); ensureChip(topic,color);
     }else{
-      c.rssi=rssi; c.lastTs=Date.now(); c.rTarget=mapRSSItoRadius(rssi);
+      // atualiza estatística de intervalo apenas para mensagens "ao vivo"
+      if (!isRetained) {
+        if (c.lastLiveTs) {
+          const dt = now - c.lastLiveTs;
+          const alpha = 0.2; // EWMA
+          c.avgInt = (c.avgInt==null) ? dt : (alpha*dt + (1-alpha)*c.avgInt);
+        }
+        c.lastLiveTs = now;
+        c.live = true;
+        c.retainedAt = undefined;
+      }
+      c.rssi = rssi;
+      c.rTarget = mapRSSItoRadius(rssi);
     }
   }
+
   function connect(){
     const username=document.getElementById('user').value.trim();
     const password=document.getElementById('pass').value;
