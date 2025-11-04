@@ -73,8 +73,8 @@
   // ====== Mapeamento de RSSI → Raio ======
   const RSSI_NEAR  = -30;
   const RSSI_FAR   = -100;
-  const R_MIN_FRAC = 0.05;  // 5% do menor lado
-  const R_MAX_FRAC = 0.18;  // 18% do menor lado
+  const R_MIN_FRAC = 0.05;  // 5% do menor lado (em unidades do mundo)
+  const R_MAX_FRAC = 0.18;  // 18% do menor lado (em unidades do mundo)
   const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
 
   // ====== Inatividade ======
@@ -100,7 +100,7 @@
     originY: 0
   };
 
-  // Armazena círculos por tópico
+  // Armazena círculos por tópico (raios em UNIDADES DO MUNDO)
   const circles = new Map(); // topic -> {x,y,rssi,rTarget,rCurrent,color,lastTs}
 
   function setStatus(text, ok=false) {
@@ -138,25 +138,28 @@
 
   function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
 
+  // NOVO: raio alvo calculado em unidades do mundo (para crescer/encolher com zoom)
   function mapRSSItoRadius(rssi) {
-    const minSide = Math.min(canvas.clientWidth, canvas.clientHeight);
-    const rMin = R_MIN_FRAC * minSide;
-    const rMax = R_MAX_FRAC * minSide;
+    // baseia-se no menor lado do canvas convertido para "mundo"
+    const minSideWorld = Math.min(canvas.clientWidth, canvas.clientHeight) / world.zoom;
+    const rMin = R_MIN_FRAC * minSideWorld;
+    const rMax = R_MAX_FRAC * minSideWorld;
     const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
     const t = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR); // 0..1
-    return rMin + t * (rMax - rMin);
+    return rMin + t * (rMax - rMin); // UNIDADES DO MUNDO
   }
 
+  // Cores HSLA semi-transparente (alpha ~0.55), estáveis por tópico
   function randomColor(seedStr) {
     let h = 0; for (let i=0;i<seedStr.length;i++) h = (h*31 + seedStr.charCodeAt(i))>>>0;
     const hue = h % 360;
-    return `hsl(${hue},70%,55%)`;
+    return `hsla(${hue},70%,55%,0.55)`;
   }
 
   function placeNewCircle(topic) {
     const idx = circles.size;
-    const spacing = 140;
-    const cols = Math.max(1, Math.floor(canvas.clientWidth / spacing));
+    const spacing = 140; // em unidades do mundo
+    const cols = Math.max(1, Math.floor((canvas.clientWidth / world.zoom) / spacing));
     const row  = Math.floor(idx / cols);
     const col  = idx % cols;
     const startX = - (cols-1) * spacing * 0.5;
@@ -222,7 +225,9 @@
     let picked = null, minD2 = Infinity;
     for (const [topic, c] of circles) {
       const d2 = (p.x - c.x)**2 + (p.y - c.y)**2;
-      if (d2 <= (c.rCurrent/world.zoom)**2 && d2 < minD2) { picked = {topic, c}; minD2 = d2; }
+      if (d2 <= (c.rCurrent)**2 && d2 < minD2) { // HIT TEST em unidades do mundo
+        picked = {topic, c}; minD2 = d2;
+      }
     }
     if (picked) {
       dragging = { topic: picked.topic, dx: p.x - picked.c.x, dy: p.y - picked.c.y };
@@ -248,9 +253,7 @@
     const now = Date.now();
     const toDelete = [];
     for (const [topic, c] of circles) {
-      if (now - c.lastTs > STALE_MS) {
-        toDelete.push(topic);
-      }
+      if (now - c.lastTs > STALE_MS) toDelete.push(topic);
     }
     for (const topic of toDelete) {
       circles.delete(topic);
@@ -265,17 +268,20 @@
     drawGrid(w, h);
 
     for (const [topic, c] of circles) {
+      // animação suave do raio (em unidades do mundo)
       c.rCurrent += (c.rTarget - c.rCurrent) * R_SMOOTH;
 
+      // círculo (RAIO EM MUNDO → cresce com zoom naturalmente)
       ctx.beginPath();
-      ctx.arc(c.x, c.y, c.rCurrent / world.zoom, 0, Math.PI*2);
-      ctx.fillStyle = c.color;
+      ctx.arc(c.x, c.y, c.rCurrent, 0, Math.PI*2);
+      ctx.fillStyle = c.color;           // semitransparente (hsla)
       ctx.fill();
-      ctx.lineWidth = 2 / world.zoom;
+      ctx.lineWidth = 2 / world.zoom;    // borda constante em px de tela
       ctx.strokeStyle = "rgba(255,255,255,0.15)";
       ctx.stroke();
 
-      ctx.fillStyle = "#e5e7eb";
+      // label
+      ctx.fillStyle = "rgba(229,231,235,0.9)";
       ctx.font = `${14 / world.zoom}px system-ui,Segoe UI,Roboto,Arial`;
       const label = `${topic.split('/').slice(-3,-1).join('/')} • ${c.rssi} dBm`;
       ctx.fillText(label, c.x + 10/world.zoom, c.y - 10/world.zoom);
@@ -287,7 +293,7 @@
   requestAnimationFrame(render);
 
   function drawGrid(w, h) {
-    const step = 100;
+    const step = 100; // passo em unidades do mundo
     const left   = world.originX - w/(2*world.zoom);
     const right  = world.originX + w/(2*world.zoom);
     const top    = world.originY - h/(2*world.zoom);
@@ -325,15 +331,22 @@
 
     let c = circles.get(topic);
     if (!c) {
-      const color = randomColor(topic);
+      const color = randomColor(topic);           // HSLA com alpha 0.55
       const pos = placeNewCircle(topic);
-      c = { x: pos.x, y: pos.y, rssi: rssi, rTarget: mapRSSItoRadius(rssi), rCurrent: 2, color, lastTs: Date.now() };
+      c = {
+        x: pos.x, y: pos.y,
+        rssi: rssi,
+        rTarget: mapRSSItoRadius(rssi), // em MUNDO
+        rCurrent: 2,                    // começa pequeno (MUNDO)
+        color,
+        lastTs: Date.now()
+      };
       circles.set(topic, c);
       ensureChip(topic, color);
     } else {
       c.rssi = rssi;
       c.lastTs = Date.now();
-      c.rTarget = mapRSSItoRadius(rssi);
+      c.rTarget = mapRSSItoRadius(rssi);          // recalcula alvo em MUNDO
     }
   }
 
@@ -366,7 +379,7 @@
     client.on('message', onMsg);
   }
 
-  btn.addEventListener('click', connect);
+  document.getElementById('btn').addEventListener('click', connect);
   btnReset.addEventListener('click', ()=>{ world.zoom=1; world.originX=0; world.originY=0; });
 </script>
 </html>
