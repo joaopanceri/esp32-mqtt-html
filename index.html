@@ -48,7 +48,7 @@
     <div class="meta" style="margin-top:8px">
       <span class="pill"><span class="led" id="led"></span><span id="st">Desconectado</span></span>
       &nbsp;•&nbsp; Duplo-clique no canvas: reset de zoom • Scroll: zoom sob o cursor • Arraste um círculo para reposicioná-lo
-      • <b>Inatividade &gt; 5s remove o círculo</b>
+      • <b>Inatividade &gt; 5s remove o círculo (com re-assinatura automática)</b>
     </div>
 
     <canvas id="view" title="Scroll = zoom • Duplo-clique = reset"></canvas>
@@ -68,15 +68,16 @@
   const TOPIC_FILTER = "esp32/beacons/+/rssi_avg";
   const KEEPALIVE    = 60;
 
-  // ====== Mapeamento de RSSI → Raio (em UNIDADES DO MUNDO, independentes do zoom) ======
+  // ====== Mapeamento de RSSI → Raio (em UNIDADES DO MUNDO) ======
   const RSSI_NEAR  = -30;
   const RSSI_FAR   = -100;
-  const R_MIN_FRAC = 0.05;  // 5% do menor lado da tela (baseline zoom=1)
-  const R_MAX_FRAC = 0.18;  // 18% do menor lado da tela (baseline zoom=1)
-  const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
+  const R_MIN_FRAC = 0.05;
+  const R_MAX_FRAC = 0.18;
+  const R_SMOOTH   = 0.15;
 
   // ====== Inatividade ======
-  const STALE_MS = 5000; // 5s sem mensagem -> remove
+  const STALE_MS = 5000;     // 5s sem mensagem -> remove
+  const RESUB_COOLDOWN = 2000; // 2s de cooldown para re-assinar
 
   // ====== Cena (world) e view (canvas) ======
   const canvas = document.getElementById('view');
@@ -93,6 +94,10 @@
 
   // círculos por tópico (raios em mundo)
   const circles = new Map(); // topic -> {x,y,rssi,rTarget,rCurrent,color,lastTs}
+
+  // debounce para re-subscribe
+  let lastResub = 0;
+  let resubPending = false;
 
   function setStatus(text, ok=false){ stEl.textContent = text; ledEl.className = "led" + (ok ? " ok" : ""); }
 
@@ -118,14 +123,13 @@
   }
   function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 
-  // *** CORRIGIDO: raio em mundo não depende do zoom.
   function mapRSSItoRadius(rssi){
     const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight); // baseline zoom=1
-    const rMin = R_MIN_FRAC * minSideScreen;  // mundo ~ pixels quando zoom=1
+    const rMin = R_MIN_FRAC * minSideScreen;
     const rMax = R_MAX_FRAC * minSideScreen;
     const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
-    const t  = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR); // 0..1
-    return rMin + t*(rMax - rMin); // UNIDADES DO MUNDO (constantes vs zoom)
+    const t  = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR);
+    return rMin + t*(rMax - rMin); // em mundo
   }
 
   function colorHSLA(seed){
@@ -195,15 +199,39 @@
   });
   window.addEventListener('mouseup', ()=>{ dragging=null; canvas.classList.remove('dragging'); });
 
+  // forçar reentrega de mensagens retidas: unsubscribe + subscribe (com debounce)
+  function resubscribeRetained() {
+    if (!client || !client.connected) return;
+    const now = Date.now();
+    if (now - lastResub < RESUB_COOLDOWN) {
+      // agenda uma única tentativa após cooldown
+      if (!resubPending) {
+        resubPending = true;
+        setTimeout(()=>{ resubPending=false; resubscribeRetained(); }, RESUB_COOLDOWN - (now - lastResub) + 10);
+      }
+      return;
+    }
+    lastResub = now;
+    client.unsubscribe(TOPIC_FILTER, () => {
+      client.subscribe(TOPIC_FILTER, { qos:0 }, (err)=>{
+        // opcional: status
+        if (!err) setStatus("Reassinado para recuperar retidas", true);
+      });
+    });
+  }
+
   // render + limpeza
   function render(){
     const w=canvas.clientWidth, h=canvas.clientHeight;
     ctx.clearRect(0,0,w,h);
 
-    // remove inativos
+    // remove inativos e, se removeu alguém, re-assina para receber retidos de volta
     const now=Date.now(), del=[];
     for(const [topic,c] of circles){ if(now-c.lastTs>STALE_MS) del.push(topic); }
-    for(const t of del){ circles.delete(t); removeChip(t); }
+    if (del.length) {
+      for(const t of del){ circles.delete(t); removeChip(t); }
+      resubscribeRetained();
+    }
 
     ctx.save();
     ctx.translate(w/2, h/2);
@@ -216,7 +244,7 @@
       c.rCurrent += (c.rTarget - c.rCurrent)*R_SMOOTH;
 
       ctx.beginPath();
-      ctx.arc(c.x, c.y, c.rCurrent, 0, Math.PI*2); // raio em mundo → cresce com zoom
+      ctx.arc(c.x, c.y, c.rCurrent, 0, Math.PI*2);
       ctx.fillStyle = c.color;        // semi-transparente
       ctx.fill();
       ctx.lineWidth = 2/world.zoom;   // borda constante em px de tela
