@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MQTT/WSS • EMQX Serverless Debug</title>
+<style>
+  body{font:14px system-ui,Segoe UI,Roboto,Arial;margin:0;padding:24px;background:#0b1220;color:#e5e7eb}
+  .box{max-width:900px;margin:auto;background:#0f172a;border:1px solid #1f2937;border-radius:14px;padding:20px}
+  label{display:block;margin:8px 0 4px;color:#94a3b8}
+  input{width:100%;padding:10px;border-radius:10px;border:1px solid #1f2937;background:#0b1220;color:#e5e7eb}
+  button{margin-top:12px;padding:10px 14px;border:0;border-radius:10px;background:#38bdf8;color:#05101b;font-weight:700;cursor:pointer}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .log{margin-top:16px;height:320px;overflow:auto;background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:10px;font-family:ui-monospace,Consolas,monospace}
+  .ok{color:#22c55e}.warn{color:#f59e0b}.bad{color:#ef4444}
+</style>
+<div class="box">
+  <h2>EMQX Serverless • MQTT over WebSocket (WSS) Debug</h2>
+  <p>Broker WSS: <code>j6466600.ala.us-east-1.emqxsl.com:8084/mqtt</code> • Tópico: <code>esp32/beacons/card/rssi_avg</code></p>
+  <div class="row">
+    <div><label>Usuário (EMQX)</label><input id="user" placeholder="username"></div>
+    <div><label>Senha (EMQX)</label><input id="pass" type="password" placeholder="******"></div>
+  </div>
+  <button id="btn">Conectar e Assinar</button>
+  <div class="log" id="log"></div>
+</div>
+
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script>
+const WS_URL = "wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt";
+const TOPIC  = "esp32/beacons/card/rssi_avg";
+const logEl  = document.getElementById('log');
+const btn    = document.getElementById('btn');
+
+let client;
+
+function log(msg, cls=""){ 
+  const d=document.createElement('div'); d.className=cls; d.textContent=msg;
+  logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
+  console.log(msg);
+}
+
+btn.onclick = () => {
+  const username = document.getElementById('user').value.trim();
+  const password = document.getElementById('pass').value;
+
+  if (!username || !password){ alert('Informe usuário e senha do EMQX.'); return; }
+
+  if (client){ try{ client.end(true); }catch(e){} }
+
+  log("Conectando via WSS: "+WS_URL,"warn");
+  client = mqtt.connect(WS_URL, {
+    username, password,
+    clean: true,
+    keepalive: 60,
+    reconnectPeriod: 2000,
+    connectTimeout: 20000,
+    clientId: 'web-'+Math.random().toString(16).slice(2),
+    protocolVersion: 4 // MQTT v3.1.1 (padrão). Use 5 se quiser: protocolVersion:5
+  });
+
+  client.on('connect', (pkt) => {
+    log("Conectado. Sessão presente? "+(pkt.sessionPresent?"sim":"não"),"ok");
+    client.subscribe(TOPIC, {qos:0}, (err,granted)=>{
+      if(err){ log("Falha ao assinar: "+err,"bad"); }
+      else { log("Assinado: "+JSON.stringify(granted),"ok"); }
+    });
+  });
+
+  client.on('reconnect', ()=> log("Reconectando...","warn"));
+  client.on('close',     ()=> log("Conexão fechada","bad"));
+  client.on('end',       ()=> log("Cliente finalizado","bad"));
+  client.on('offline',   ()=> log("Offline","bad"));
+  client.on('error', (e)=>{
+    log("Erro: "+(e && e.message ? e.message : e),"bad");
+  });
+
+  client.on('message', (topic, payload, packet) => {
+    const txt = new TextDecoder().decode(payload).trim();
+    const info = `topic=${topic} | qos=${packet.qos} | retained=${packet.retain}`;
+    let num = Number(txt); let out = txt;
+    if (Number.isNaN(num)) {
+      try { const obj = JSON.parse(txt); if(typeof obj.rssi_avg==='number'){ out = obj.rssi_avg+" (JSON)"; } } catch {}
+    }
+    log(`MSG ➜ ${out}    (${info})`,"");
+  });
+};
+</script>

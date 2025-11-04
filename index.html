@@ -1,86 +1,181 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MQTT/WSS • EMQX Serverless Debug</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>RSSI → Círculo (MQTT/WSS • EMQX)</title>
 <style>
-  body{font:14px system-ui,Segoe UI,Roboto,Arial;margin:0;padding:24px;background:#0b1220;color:#e5e7eb}
-  .box{max-width:900px;margin:auto;background:#0f172a;border:1px solid #1f2937;border-radius:14px;padding:20px}
-  label{display:block;margin:8px 0 4px;color:#94a3b8}
-  input{width:100%;padding:10px;border-radius:10px;border:1px solid #1f2937;background:#0b1220;color:#e5e7eb}
-  button{margin-top:12px;padding:10px 14px;border:0;border-radius:10px;background:#38bdf8;color:#05101b;font-weight:700;cursor:pointer}
-  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-  .log{margin-top:16px;height:320px;overflow:auto;background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:10px;font-family:ui-monospace,Consolas,monospace}
-  .ok{color:#22c55e}.warn{color:#f59e0b}.bad{color:#ef4444}
+  :root{--bg:#0b1220;--panel:#0f172a;--text:#e5e7eb;--muted:#94a3b8;--accent:#38bdf8}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,Segoe UI,Roboto,Arial}
+  .wrap{max-width:960px;margin:32px auto;padding:20px}
+  .box{background:var(--panel);border:1px solid #1f2937;border-radius:14px;padding:16px}
+  .row{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end}
+  label{display:block;color:var(--muted);margin-bottom:6px}
+  input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #1f2937;background:#0b1220;color:var(--text)}
+  button{padding:10px 14px;border:0;border-radius:10px;background:var(--accent);color:#05101b;font-weight:700;cursor:pointer}
+  .meta{color:var(--muted);margin-top:10px}
+  canvas{width:100%;height:60vh;display:block;background:#0b1220;border:1px solid #1f2937;border-radius:14px;margin-top:16px}
+  .legend{margin-top:8px;color:var(--muted);font-size:13px}
+  code{background:#0b1220;border:1px solid #1f2937;border-radius:6px;padding:0 6px}
 </style>
-<div class="box">
-  <h2>EMQX Serverless • MQTT over WebSocket (WSS) Debug</h2>
-  <p>Broker WSS: <code>j6466600.ala.us-east-1.emqxsl.com:8084/mqtt</code> • Tópico: <code>esp32/beacons/card/rssi_avg</code></p>
-  <div class="row">
-    <div><label>Usuário (EMQX)</label><input id="user" placeholder="username"></div>
-    <div><label>Senha (EMQX)</label><input id="pass" type="password" placeholder="******"></div>
+
+<div class="wrap">
+  <div class="box">
+    <h2 style="margin:0 0 8px">Círculo em tempo real por RSSI (EMQX Serverless)</h2>
+    <div class="meta">
+      Broker WSS: <code>wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt</code> • Tópico: <code>esp32/beacons/card/rssi_avg</code>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <div>
+        <label>Usuário (EMQX)</label>
+        <input id="user" placeholder="ex.: esp32_card01" autocomplete="username">
+      </div>
+      <div>
+        <label>Senha (EMQX)</label>
+        <input id="pass" type="password" placeholder="••••••••" autocomplete="current-password">
+      </div>
+      <div>
+        <button id="btn">Conectar</button>
+      </div>
+    </div>
+
+    <canvas id="view"></canvas>
+    <div class="legend">
+      Mapeamento linear: <code>-30 dBm → raio máx</code> • <code>-100 dBm → raio mín</code>.  
+      Se o payload vier em JSON, tentamos usar <code>rssi_avg</code>.
+    </div>
+    <div class="meta" id="status">Status: aguardando conexão…</div>
   </div>
-  <button id="btn">Conectar e Assinar</button>
-  <div class="log" id="log"></div>
 </div>
 
+<!-- MQTT.js para navegador -->
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <script>
-const WS_URL = "wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt";
-const TOPIC  = "esp32/beacons/card/rssi_avg";
-const logEl  = document.getElementById('log');
-const btn    = document.getElementById('btn');
+  const WS_URL = "wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt";
+  const TOPIC  = "esp32/beacons/card/rssi_avg";
 
-let client;
+  // Faixa de mapeamento do RSSI (dBm)
+  const RSSI_NEAR = -30, RSSI_FAR = -100;
 
-function log(msg, cls=""){ 
-  const d=document.createElement('div'); d.className=cls; d.textContent=msg;
-  logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
-  console.log(msg);
-}
+  // Raio mínimo/máximo em pixels (relativos ao menor lado do canvas)
+  const R_MIN_FRAC = 0.06;   // 6% do menor lado
+  const R_MAX_FRAC = 0.45;   // 45% do menor lado
 
-btn.onclick = () => {
-  const username = document.getElementById('user').value.trim();
-  const password = document.getElementById('pass').value;
+  const canvas = document.getElementById('view');
+  const ctx = canvas.getContext('2d');
+  const st  = document.getElementById('status');
+  const btn = document.getElementById('btn');
 
-  if (!username || !password){ alert('Informe usuário e senha do EMQX.'); return; }
+  let client = null;
+  let targetR = 0;     // raio desejado (alvo)
+  let currentR = 0;    // raio atual (animado)
+  let currentRSSI = null;
 
-  if (client){ try{ client.end(true); }catch(e){} }
+  function setStatus(msg){ st.textContent = "Status: " + msg; }
 
-  log("Conectando via WSS: "+WS_URL,"warn");
-  client = mqtt.connect(WS_URL, {
-    username, password,
-    clean: true,
-    keepalive: 60,
-    reconnectPeriod: 2000,
-    connectTimeout: 20000,
-    clientId: 'web-'+Math.random().toString(16).slice(2),
-    protocolVersion: 4 // MQTT v3.1.1 (padrão). Use 5 se quiser: protocolVersion:5
-  });
+  function resize() {
+    // Ajusta o canvas à tela (devicePixelRatio para nitidez)
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const rect = canvas.getBoundingClientRect();
+    canvas.width  = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // pinta em CSS pixels
+  }
+  window.addEventListener('resize', resize);
+  resize();
 
-  client.on('connect', (pkt) => {
-    log("Conectado. Sessão presente? "+(pkt.sessionPresent?"sim":"não"),"ok");
-    client.subscribe(TOPIC, {qos:0}, (err,granted)=>{
-      if(err){ log("Falha ao assinar: "+err,"bad"); }
-      else { log("Assinado: "+JSON.stringify(granted),"ok"); }
+  function mapRSSItoRadius(rssi) {
+    // Clampa rssi à faixa
+    const r = Math.max(RSSI_FAR, Math.min(RSSI_NEAR, rssi));
+    // normaliza: -100..-30 -> 0..1
+    const t = (r - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR); // 0=longe, 1=perto
+    const minSide = Math.min(canvas.clientWidth, canvas.clientHeight);
+    const rMin = R_MIN_FRAC * minSide;
+    const rMax = R_MAX_FRAC * minSide;
+    return rMin + t * (rMax - rMin);
+  }
+
+  function draw() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    // fundo
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, w, h);
+
+    // animação suave: aproxima currentR do targetR
+    const smoothing = 0.12; // 0..1 (maior = mais rápido)
+    currentR += (targetR - currentR) * smoothing;
+
+    // cor muda levemente conforme proximidade (mais perto = mais clara)
+    const t = Math.max(0, Math.min(1,
+      (currentR - (R_MIN_FRAC*Math.min(w,h))) /
+      ((R_MAX_FRAC-R_MIN_FRAC)*Math.min(w,h))
+    ));
+    const hue = 200 - 120 * t; // de azul para esverdeado
+    ctx.fillStyle = `hsl(${hue},70%,55%)`;
+    ctx.beginPath();
+    ctx.arc(w/2, h/2, Math.max(2, currentR), 0, Math.PI*2);
+    ctx.fill();
+
+    // legenda de valor
+    ctx.fillStyle = "#e5e7eb";
+    ctx.font = "16px system-ui,Segoe UI,Roboto,Arial";
+    const label = (currentRSSI==null) ? "Sem dados" : `RSSI: ${currentRSSI} dBm`;
+    ctx.fillText(label, 12, 24);
+
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+
+  function parsePayload(buf) {
+    let txt = new TextDecoder().decode(buf).trim();
+    let num = Number(txt);
+    if (!Number.isNaN(num)) return num;
+    try {
+      const obj = JSON.parse(txt);
+      if (typeof obj === 'number') return obj;
+      if (typeof obj.rssi_avg === 'number') return obj.rssi_avg;
+    } catch(e){}
+    return null;
+  }
+
+  btn.addEventListener('click', () => {
+    const username = document.getElementById('user').value.trim();
+    const password = document.getElementById('pass').value;
+    if (!username || !password) {
+      alert("Informe usuário e senha do EMQX.");
+      return;
+    }
+
+    if (client) { try { client.end(true); } catch(e){} client = null; }
+
+    setStatus("Conectando…");
+    client = mqtt.connect(WS_URL, {
+      username, password,
+      clean: true, keepalive: 60,
+      reconnectPeriod: 2000, connectTimeout: 20000,
+      clientId: 'web-'+Math.random().toString(16).slice(2)
+    });
+
+    client.on('connect', () => {
+      setStatus("Conectado. Assinando tópico…");
+      client.subscribe(TOPIC, { qos: 0 }, (err) => {
+        if (err) setStatus("Falha ao assinar: " + err);
+        else     setStatus("Assinado em " + TOPIC + ". Aguardando mensagens…");
+      });
+    });
+    client.on('error',  (e)=> setStatus("Erro: " + (e && e.message ? e.message : e)));
+    client.on('close',  ()=> setStatus("Conexão encerrada"));
+    client.on('reconnect', ()=> setStatus("Reconectando…"));
+
+    client.on('message', (topic, payload, packet) => {
+      const rssi = parsePayload(payload);
+      if (rssi == null) { setStatus("Payload não numérico recebido"); return; }
+      currentRSSI = rssi;
+      targetR = mapRSSItoRadius(rssi);
+      // opcional: marca se veio retido
+      if (packet && packet.retain) setStatus(`Recebido (retido) • ${rssi} dBm`);
+      else setStatus(`Recebido • ${rssi} dBm`);
     });
   });
-
-  client.on('reconnect', ()=> log("Reconectando...","warn"));
-  client.on('close',     ()=> log("Conexão fechada","bad"));
-  client.on('end',       ()=> log("Cliente finalizado","bad"));
-  client.on('offline',   ()=> log("Offline","bad"));
-  client.on('error', (e)=>{
-    log("Erro: "+(e && e.message ? e.message : e),"bad");
-  });
-
-  client.on('message', (topic, payload, packet) => {
-    const txt = new TextDecoder().decode(payload).trim();
-    const info = `topic=${topic} | qos=${packet.qos} | retained=${packet.retain}`;
-    let num = Number(txt); let out = txt;
-    if (Number.isNaN(num)) {
-      try { const obj = JSON.parse(txt); if(typeof obj.rssi_avg==='number'){ out = obj.rssi_avg+" (JSON)"; } } catch {}
-    }
-    log(`MSG ➜ ${out}    (${info})`,"");
-  });
-};
 </script>
+</html>
