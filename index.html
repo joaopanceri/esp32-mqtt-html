@@ -29,7 +29,7 @@
   <div class="box">
     <h2 style="margin:0 0 8px">Círculos por RSSI (múltiplos tópicos) • Zoom no scroll & arrastar</h2>
     <div class="meta">
-      Broker WSS: <code>wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt</code> • Filtro: <code>esp32/beacons/+/rssi_avg</code> (um círculo por tópico)
+      Broker WSS: <code>wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt</code> • Filtro: <code>esp32/beacons/+/rssi_avg</code>
     </div>
 
     <div class="row" style="margin-top:12px">
@@ -54,27 +54,25 @@
     <canvas id="view" title="Scroll = zoom • Duplo-clique = reset"></canvas>
 
     <div class="legend">
-      Raio mapeado linearmente: <code>-30 dBm → maior</code> • <code>-100 dBm → menor</code>.  
-      Este visor espera payload como número (ex.: <code>-63</code>). Se vier JSON contendo <code>rssi_avg</code>, ele também entende.
+      Raio: <code>-30 dBm → maior</code> • <code>-100 dBm → menor</code>. Payload pode ser número puro ou JSON com <code>rssi_avg</code>.
     </div>
 
     <div class="list" id="chips"></div>
   </div>
 </div>
 
-<!-- MQTT.js (browser) -->
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <script>
   // ====== MQTT / Tópicos ======
   const WS_URL       = "wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt";
-  const TOPIC_FILTER = "esp32/beacons/+/rssi_avg"; // um círculo por tópico
+  const TOPIC_FILTER = "esp32/beacons/+/rssi_avg";
   const KEEPALIVE    = 60;
 
-  // ====== Mapeamento de RSSI → Raio ======
+  // ====== Mapeamento de RSSI → Raio (em UNIDADES DO MUNDO, independentes do zoom) ======
   const RSSI_NEAR  = -30;
   const RSSI_FAR   = -100;
-  const R_MIN_FRAC = 0.05;  // 5% do menor lado (em unidades do mundo)
-  const R_MAX_FRAC = 0.18;  // 18% do menor lado (em unidades do mundo)
+  const R_MIN_FRAC = 0.05;  // 5% do menor lado da tela (baseline zoom=1)
+  const R_MAX_FRAC = 0.18;  // 18% do menor lado da tela (baseline zoom=1)
   const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
 
   // ====== Inatividade ======
@@ -91,25 +89,14 @@
 
   let client = null;
 
-  // Mundo: coordenadas lógicas (independentes do zoom)
-  const world = {
-    zoom: 1.0,
-    minZoom: 0.3,
-    maxZoom: 4.0,
-    originX: 0,
-    originY: 0
-  };
+  const world = { zoom: 1, minZoom: 0.3, maxZoom: 4, originX: 0, originY: 0 };
 
-  // Armazena círculos por tópico (raios em UNIDADES DO MUNDO)
+  // círculos por tópico (raios em mundo)
   const circles = new Map(); // topic -> {x,y,rssi,rTarget,rCurrent,color,lastTs}
 
-  function setStatus(text, ok=false) {
-    stEl.textContent = text;
-    ledEl.className = "led" + (ok ? " ok" : "");
-  }
+  function setStatus(text, ok=false){ stEl.textContent = text; ledEl.className = "led" + (ok ? " ok" : ""); }
 
-  // ====== Utils de transformações ======
-  function resizeCanvas() {
+  function resizeCanvas(){
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const rect = canvas.getBoundingClientRect();
     canvas.width  = Math.floor(rect.width * dpr);
@@ -119,170 +106,125 @@
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas();
 
-  function screenToWorld(sx, sy) {
-    const cx = sx - canvas.clientWidth  / 2;
-    const cy = sy - canvas.clientHeight / 2;
-    return {
-      x: world.originX + cx / world.zoom,
-      y: world.originY + cy / world.zoom
-    };
+  function screenToWorld(sx, sy){
+    const cx = sx - canvas.clientWidth/2;
+    const cy = sy - canvas.clientHeight/2;
+    return { x: world.originX + cx/world.zoom, y: world.originY + cy/world.zoom };
   }
-  function worldToScreen(wx, wy) {
-    const cx = (wx - world.originX) * world.zoom;
-    const cy = (wy - world.originY) * world.zoom;
-    return {
-      x: canvas.clientWidth/2  + cx,
-      y: canvas.clientHeight/2 + cy
-    };
+  function worldToScreen(wx, wy){
+    const cx = (wx - world.originX)*world.zoom;
+    const cy = (wy - world.originY)*world.zoom;
+    return { x: canvas.clientWidth/2 + cx, y: canvas.clientHeight/2 + cy };
   }
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 
-  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
-
-  // NOVO: raio alvo calculado em unidades do mundo (para crescer/encolher com zoom)
-  function mapRSSItoRadius(rssi) {
-    // baseia-se no menor lado do canvas convertido para "mundo"
-    const minSideWorld = Math.min(canvas.clientWidth, canvas.clientHeight) / world.zoom;
-    const rMin = R_MIN_FRAC * minSideWorld;
-    const rMax = R_MAX_FRAC * minSideWorld;
+  // *** CORRIGIDO: raio em mundo não depende do zoom.
+  function mapRSSItoRadius(rssi){
+    const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight); // baseline zoom=1
+    const rMin = R_MIN_FRAC * minSideScreen;  // mundo ~ pixels quando zoom=1
+    const rMax = R_MAX_FRAC * minSideScreen;
     const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
-    const t = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR); // 0..1
-    return rMin + t * (rMax - rMin); // UNIDADES DO MUNDO
+    const t  = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR); // 0..1
+    return rMin + t*(rMax - rMin); // UNIDADES DO MUNDO (constantes vs zoom)
   }
 
-  // Cores HSLA semi-transparente (alpha ~0.55), estáveis por tópico
-  function randomColor(seedStr) {
-    let h = 0; for (let i=0;i<seedStr.length;i++) h = (h*31 + seedStr.charCodeAt(i))>>>0;
-    const hue = h % 360;
-    return `hsla(${hue},70%,55%,0.55)`;
+  function colorHSLA(seed){
+    let h=0; for(let i=0;i<seed.length;i++) h=(h*31+seed.charCodeAt(i))>>>0;
+    const hue = h%360;
+    return `hsla(${hue},70%,55%,0.55)`; // semi-transparente
   }
 
-  function placeNewCircle(topic) {
+  function placeNewCircle(topic){
     const idx = circles.size;
-    const spacing = 140; // em unidades do mundo
-    const cols = Math.max(1, Math.floor((canvas.clientWidth / world.zoom) / spacing));
-    const row  = Math.floor(idx / cols);
-    const col  = idx % cols;
-    const startX = - (cols-1) * spacing * 0.5;
-    const x = startX + col * spacing;
-    const y = -150 + row * spacing;
-    return { x, y };
+    const spacing = 140; // em mundo
+    const cols = Math.max(1, Math.floor((canvas.clientWidth/world.zoom)/spacing));
+    const row  = Math.floor(idx/cols);
+    const col  = idx%cols;
+    const startX = -(cols-1)*spacing*0.5;
+    return { x: startX + col*spacing, y: -150 + row*spacing };
   }
 
-  function ensureChip(topic, color) {
-    const id = "chip-"+cssId(topic);
-    if (document.getElementById(id)) return;
-    const chip = document.createElement("div");
-    chip.className = "chip";
-    chip.id = id;
-    const d = document.createElement("span");
-    d.className = "dot";
-    d.style.background = color;
-    const t = document.createElement("span");
-    t.textContent = topic;
-    chip.appendChild(d); chip.appendChild(t);
-    chips.appendChild(chip);
+  function ensureChip(topic,color){
+    const id="chip-"+topic.replace(/[^a-z0-9_-]/gi,'_');
+    if(document.getElementById(id)) return;
+    const chip=document.createElement('div'); chip.className='chip'; chip.id=id;
+    const d=document.createElement('span'); d.className='dot'; d.style.background=color;
+    const t=document.createElement('span'); t.textContent=topic;
+    chip.appendChild(d); chip.appendChild(t); chips.appendChild(chip);
   }
   function removeChip(topic){
-    const el = document.getElementById("chip-"+cssId(topic));
-    if (el && el.parentNode) el.parentNode.removeChild(el);
+    const id="chip-"+topic.replace(/[^a-z0-9_-]/gi,'_');
+    const el=document.getElementById(id); if(el&&el.parentNode) el.parentNode.removeChild(el);
   }
-  function cssId(t){ return t.replace(/[^a-z0-9_-]/gi,'_'); }
 
-  // ====== Interação: zoom no scroll ======
-  canvas.addEventListener('wheel', (e) => {
+  // zoom no scroll
+  canvas.addEventListener('wheel', (e)=>{
     e.preventDefault();
-    const delta = -Math.sign(e.deltaY) * 0.12;
-    const oldZoom = world.zoom;
-    const newZoom = clamp(world.zoom * (1 + delta), world.minZoom, world.maxZoom);
-    if (newZoom === oldZoom) return;
-
+    const delta = -Math.sign(e.deltaY)*0.12;
+    const oldZ = world.zoom, newZ = clamp(world.zoom*(1+delta), world.minZoom, world.maxZoom);
+    if(newZ===oldZ) return;
     const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    const before = screenToWorld(mouseX, mouseY);
-    world.zoom = newZoom;
-    const after  = screenToWorld(mouseX, mouseY);
-
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    const before=screenToWorld(mx,my);
+    world.zoom=newZ;
+    const after=screenToWorld(mx,my);
     world.originX += (before.x - after.x);
     world.originY += (before.y - after.y);
-  }, { passive:false });
+  }, {passive:false});
 
-  // Duplo-clique: reset view
-  canvas.addEventListener('dblclick', () => {
-    world.zoom = 1.0;
-    world.originX = 0;
-    world.originY = 0;
+  // reset view
+  canvas.addEventListener('dblclick', ()=>{ world.zoom=1; world.originX=0; world.originY=0; });
+
+  // drag de círculos
+  let dragging=null;
+  canvas.addEventListener('mousedown',(e)=>{
+    const rect=canvas.getBoundingClientRect();
+    const p=screenToWorld(e.clientX-rect.left, e.clientY-rect.top);
+    let pick=null, best=Infinity;
+    for(const [topic,c] of circles){
+      const d2=(p.x-c.x)**2+(p.y-c.y)**2;
+      if(d2<=c.rCurrent**2 && d2<best){ pick={topic,c}; best=d2; }
+    }
+    if(pick){ dragging={topic:pick.topic, dx:p.x-pick.c.x, dy:p.y-pick.c.y}; canvas.classList.add('dragging');}
   });
-
-  // ====== Interação: arrastar círculos ======
-  let dragging = null; // {topic, dx, dy}
-  canvas.addEventListener('mousedown', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
-    const p = screenToWorld(sx, sy);
-
-    let picked = null, minD2 = Infinity;
-    for (const [topic, c] of circles) {
-      const d2 = (p.x - c.x)**2 + (p.y - c.y)**2;
-      if (d2 <= (c.rCurrent)**2 && d2 < minD2) { // HIT TEST em unidades do mundo
-        picked = {topic, c}; minD2 = d2;
-      }
-    }
-    if (picked) {
-      dragging = { topic: picked.topic, dx: p.x - picked.c.x, dy: p.y - picked.c.y };
-      canvas.classList.add('dragging');
-    }
+  window.addEventListener('mousemove',(e)=>{
+    if(!dragging) return;
+    const rect=canvas.getBoundingClientRect();
+    const p=screenToWorld(e.clientX-rect.left, e.clientY-rect.top);
+    const c=circles.get(dragging.topic); if(c){ c.x=p.x-dragging.dx; c.y=p.y-dragging.dy; }
   });
-  window.addEventListener('mousemove', (e) => {
-    if (!dragging) return;
-    const rect = canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
-    const p = screenToWorld(sx, sy);
-    const c = circles.get(dragging.topic);
-    if (c) { c.x = p.x - dragging.dx; c.y = p.y - dragging.dy; }
-  });
-  window.addEventListener('mouseup', () => { dragging = null; canvas.classList.remove('dragging'); });
+  window.addEventListener('mouseup', ()=>{ dragging=null; canvas.classList.remove('dragging'); });
 
-  // ====== Render + limpeza de inativos ======
-  function render() {
-    const w = canvas.clientWidth, h = canvas.clientHeight;
-    ctx.clearRect(0, 0, w, h);
+  // render + limpeza
+  function render(){
+    const w=canvas.clientWidth, h=canvas.clientHeight;
+    ctx.clearRect(0,0,w,h);
 
-    // limpeza: remove círculos sem mensagem por > STALE_MS
-    const now = Date.now();
-    const toDelete = [];
-    for (const [topic, c] of circles) {
-      if (now - c.lastTs > STALE_MS) toDelete.push(topic);
-    }
-    for (const topic of toDelete) {
-      circles.delete(topic);
-      removeChip(topic);
-    }
+    // remove inativos
+    const now=Date.now(), del=[];
+    for(const [topic,c] of circles){ if(now-c.lastTs>STALE_MS) del.push(topic); }
+    for(const t of del){ circles.delete(t); removeChip(t); }
 
     ctx.save();
     ctx.translate(w/2, h/2);
     ctx.scale(world.zoom, world.zoom);
     ctx.translate(-world.originX, -world.originY);
 
-    drawGrid(w, h);
+    drawGrid(w,h);
 
-    for (const [topic, c] of circles) {
-      // animação suave do raio (em unidades do mundo)
-      c.rCurrent += (c.rTarget - c.rCurrent) * R_SMOOTH;
+    for(const [topic,c] of circles){
+      c.rCurrent += (c.rTarget - c.rCurrent)*R_SMOOTH;
 
-      // círculo (RAIO EM MUNDO → cresce com zoom naturalmente)
       ctx.beginPath();
-      ctx.arc(c.x, c.y, c.rCurrent, 0, Math.PI*2);
-      ctx.fillStyle = c.color;           // semitransparente (hsla)
+      ctx.arc(c.x, c.y, c.rCurrent, 0, Math.PI*2); // raio em mundo → cresce com zoom
+      ctx.fillStyle = c.color;        // semi-transparente
       ctx.fill();
-      ctx.lineWidth = 2 / world.zoom;    // borda constante em px de tela
+      ctx.lineWidth = 2/world.zoom;   // borda constante em px de tela
       ctx.strokeStyle = "rgba(255,255,255,0.15)";
       ctx.stroke();
 
-      // label
       ctx.fillStyle = "rgba(229,231,235,0.9)";
-      ctx.font = `${14 / world.zoom}px system-ui,Segoe UI,Roboto,Arial`;
+      ctx.font = `${14/world.zoom}px system-ui,Segoe UI,Roboto,Arial`;
       const label = `${topic.split('/').slice(-3,-1).join('/')} • ${c.rssi} dBm`;
       ctx.fillText(label, c.x + 10/world.zoom, c.y - 10/world.zoom);
     }
@@ -292,93 +234,56 @@
   }
   requestAnimationFrame(render);
 
-  function drawGrid(w, h) {
-    const step = 100; // passo em unidades do mundo
-    const left   = world.originX - w/(2*world.zoom);
-    const right  = world.originX + w/(2*world.zoom);
-    const top    = world.originY - h/(2*world.zoom);
-    const bottom = world.originY + h/(2*world.zoom);
+  function drawGrid(w,h){
+    const step=100;
+    const left=world.originX - w/(2*world.zoom);
+    const right=world.originX + w/(2*world.zoom);
+    const top=world.originY - h/(2*world.zoom);
+    const bottom=world.originY + h/(2*world.zoom);
+    const sx=Math.floor(left/step)*step, ex=Math.ceil(right/step)*step;
+    const sy=Math.floor(top/step)*step,  ey=Math.ceil(bottom/step)*step;
 
-    const startX = Math.floor(left/step)*step;
-    const endX   = Math.ceil(right/step)*step;
-    const startY = Math.floor(top/step)*step;
-    const endY   = Math.ceil(bottom/step)*step;
-
-    ctx.lineWidth = 1/world.zoom;
-    ctx.strokeStyle = "rgba(148,163,184,0.1)";
+    ctx.lineWidth=1/world.zoom;
+    ctx.strokeStyle="rgba(148,163,184,0.1)";
     ctx.beginPath();
-    for (let x=startX; x<=endX; x+=step) { ctx.moveTo(x, top); ctx.lineTo(x, bottom); }
-    for (let y=startY; y<=endY; y+=step) { ctx.moveTo(left, y); ctx.lineTo(right, y); }
+    for(let x=sx;x<=ex;x+=step){ ctx.moveTo(x,top); ctx.lineTo(x,bottom); }
+    for(let y=sy;y<=ey;y+=step){ ctx.moveTo(left,y); ctx.lineTo(right,y); }
     ctx.stroke();
   }
 
-  // ====== MQTT ======
-  function parsePayload(buf) {
-    let txt = new TextDecoder().decode(buf).trim();
-    let num = Number(txt);
-    if (!Number.isNaN(num)) return num;
-    try {
-      const obj = JSON.parse(txt);
-      if (typeof obj === 'number') return obj;
-      if (typeof obj.rssi_avg === 'number') return obj.rssi_avg;
-    } catch(e){}
+  // MQTT
+  function parsePayload(buf){
+    let txt=new TextDecoder().decode(buf).trim();
+    let num=Number(txt);
+    if(!Number.isNaN(num)) return num;
+    try{ const o=JSON.parse(txt); if(typeof o==='number') return o; if(typeof o.rssi_avg==='number') return o.rssi_avg; }catch(e){}
     return null;
   }
-
-  function onMsg(topic, payload, packet) {
-    const rssi = parsePayload(payload);
-    if (rssi == null) return;
-
-    let c = circles.get(topic);
-    if (!c) {
-      const color = randomColor(topic);           // HSLA com alpha 0.55
-      const pos = placeNewCircle(topic);
-      c = {
-        x: pos.x, y: pos.y,
-        rssi: rssi,
-        rTarget: mapRSSItoRadius(rssi), // em MUNDO
-        rCurrent: 2,                    // começa pequeno (MUNDO)
-        color,
-        lastTs: Date.now()
-      };
-      circles.set(topic, c);
-      ensureChip(topic, color);
-    } else {
-      c.rssi = rssi;
-      c.lastTs = Date.now();
-      c.rTarget = mapRSSItoRadius(rssi);          // recalcula alvo em MUNDO
+  function onMsg(topic, payload, packet){
+    const rssi=parsePayload(payload); if(rssi==null) return;
+    let c=circles.get(topic);
+    if(!c){
+      const color=colorHSLA(topic);
+      const pos=placeNewCircle(topic);
+      c={ x:pos.x, y:pos.y, rssi, rTarget:mapRSSItoRadius(rssi), rCurrent:2, color, lastTs:Date.now() };
+      circles.set(topic,c); ensureChip(topic,color);
+    }else{
+      c.rssi=rssi; c.lastTs=Date.now(); c.rTarget=mapRSSItoRadius(rssi);
     }
   }
-
-  function connect() {
-    const username = document.getElementById('user').value.trim();
-    const password = document.getElementById('pass').value;
-    if (!username || !password) { alert("Informe usuário e senha do EMQX."); return; }
-
-    if (client) { try{ client.end(true);}catch(e){} client=null; }
-
-    setStatus("Conectando…", false);
-    client = mqtt.connect(WS_URL, {
-      username, password,
-      clean:true, keepalive:KEEPALIVE,
-      reconnectPeriod:2000, connectTimeout:20000,
-      clientId: 'web-'+Math.random().toString(16).slice(2),
-      protocolVersion: 4
-    });
-
-    client.on('connect', () => {
-      setStatus("Conectado", true);
-      client.subscribe(TOPIC_FILTER, { qos:0 }, (err,granted)=>{
-        if (err) setStatus("Falha ao assinar", false);
-        else setStatus(`Assinado: ${granted.map(g=>g.topic).join(', ')}`, true);
-      });
-    });
-    client.on('reconnect', ()=> setStatus("Reconectando…", false));
-    client.on('close', ()=> setStatus("Desconectado", false));
-    client.on('error', (e)=> setStatus("Erro: "+(e?.message||e), false));
+  function connect(){
+    const username=document.getElementById('user').value.trim();
+    const password=document.getElementById('pass').value;
+    if(!username||!password){ alert("Informe usuário e senha do EMQX."); return; }
+    if(client){ try{client.end(true);}catch(e){} client=null; }
+    setStatus("Conectando…",false);
+    client=mqtt.connect(WS_URL,{username,password,clean:true,keepalive:KEEPALIVE,reconnectPeriod:2000,connectTimeout:20000,clientId:'web-'+Math.random().toString(16).slice(2),protocolVersion:4});
+    client.on('connect',()=>{ setStatus("Conectado",true); client.subscribe(TOPIC_FILTER,{qos:0},(err,g)=>{ setStatus(err?"Falha ao assinar":"Assinado: "+g.map(x=>x.topic).join(', '), !err); }); });
+    client.on('reconnect',()=>setStatus("Reconectando…",false));
+    client.on('close',()=>setStatus("Desconectado",false));
+    client.on('error',e=>setStatus("Erro: "+(e?.message||e),false));
     client.on('message', onMsg);
   }
-
   document.getElementById('btn').addEventListener('click', connect);
   btnReset.addEventListener('click', ()=>{ world.zoom=1; world.originX=0; world.originY=0; });
 </script>
