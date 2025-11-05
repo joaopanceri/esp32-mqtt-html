@@ -69,15 +69,19 @@
   // ====== Config ======
   const DEFAULT_ENDPOINT = "https://esp32ble-83c9a-default-rtdb.firebaseio.com/medicoes.json";
 
-  // ====== Intervalo de RSSI (dBm) e correção log ======
-  const RSSI_NEAR  = -40;   // mais forte (maior círculo)
-  const RSSI_FAR   = -90;   // mais fraco (menor círculo)
-  const GAMMA      = 0.6;   // <1 amplia diferenças; >1 comprime. Ajuste a gosto.
 
-  // ====== Mapeamento de RSSI → Raio (unidades do mundo) ======
-  const R_MIN_FRAC = 0.05;  // 5% do menor lado (zoom=1)
-  const R_MAX_FRAC = 0.18;  // 18% do menor lado (zoom=1)
-  const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
+  // ====== Intervalo de RSSI (dBm) — linear ======
+const RSSI_NEAR  = -40;   // mais forte (maior círculo)
+const RSSI_FAR   = -90;   // mais fraco (menor círculo)
+
+// ====== Ganho global de tamanho (ajuste “o quanto” quer ampliar) ======
+const SIZE_GAIN  = 1.35;  // 1.0 = sem ganho; 1.2~1.6 deixa mais visível
+
+// ====== Mapeamento de RSSI → Raio (linear, em UNIDADES DO MUNDO) ======
+const R_MIN_FRAC = 0.06;  // 6% do menor lado (baseline zoom=1)
+const R_MAX_FRAC = 0.26;  // 26% do menor lado (baseline zoom=1)
+const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
+
 
   // ====== Cena (world) e view (canvas) ======
   const canvas = document.getElementById('view');
@@ -122,26 +126,28 @@
   }
   function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 
-  // ---- NOVO mapeamento com correção log (dBm → potência relativa) + gamma ----
-  function mapRSSItoRadius(rssi){
-    const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight);
-    const rMin = R_MIN_FRAC * minSideScreen;
-    const rMax = R_MAX_FRAC * minSideScreen;
 
-    // clamp em dBm
-    const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
+function mapRSSItoRadius(rssi){
+  const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight);
+  const baseMin = R_MIN_FRAC * minSideScreen;
+  const baseMax = R_MAX_FRAC * minSideScreen;
 
-    // potência relativa normalizada (0…1) a partir do dBm:
-    // P_rel = 10^((rr - RSSI_FAR)/10) / 10^((RSSI_NEAR - RSSI_FAR)/10)
-    const pNear = Math.pow(10, (RSSI_NEAR - RSSI_FAR) / 10);   // constante
-    const pThis = Math.pow(10, (rr         - RSSI_FAR) / 10);
-    let t = pThis / pNear;   // 0..1 (linear em potência)
+  // clamp em dBm para o range desejado
+  const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
 
-    // gamma para “abrir” diferenças (GAMMA<1 realça variações em sinais fracos)
-    t = Math.pow(t, GAMMA);
+  // mapeamento linear 0..1
+  const t  = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR);
 
-    return rMin + t*(rMax - rMin); // raio em unidades do mundo
-  }
+  // raio linear + ganho global
+  let r = baseMin + t * (baseMax - baseMin);
+  r *= SIZE_GAIN;
+
+  // (opcional) garantir limite superior após o ganho
+  const rMaxGain = baseMax * SIZE_GAIN;
+  r = clamp(r, baseMin, rMaxGain);
+
+  return r; // em unidades do MUNDO → cresce/encolhe com o zoom
+}
 
   function colorHSLA(seed){
     let h=0; for(let i=0;i<seed.length;i++) h=(h*31+seed.charCodeAt(i))>>>0;
