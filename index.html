@@ -5,20 +5,20 @@
 <title>Multi-RSSI • Círculos com Zoom & Drag (Firebase RTDB)</title>
 <style>
   :root{--bg:#0b1220;--panel:#0f172a;--text:#e5e7eb;--muted:#94a3b8;--accent:#38bdf8}
-  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,Segoe UI,Roboto,Arial}
+  body{margin:0;background:#0b1220;color:#e5e7eb;font:15px/1.5 system-ui,Segoe UI,Roboto,Arial}
   .wrap{max-width:1100px;margin:32px auto;padding:20px}
-  .box{background:var(--panel);border:1px solid #1f2937;border-radius:14px;padding:16px}
+  .box{background:#0f172a;border:1px solid #1f2937;border-radius:14px;padding:16px}
   .row{display:grid;grid-template-columns:1.4fr 1fr 1fr auto auto;gap:10px;align-items:end}
-  label{display:block;color:var(--muted);margin-bottom:6px}
-  input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #1f2937;background:#0b1220;color:var(--text)}
-  button{padding:10px 14px;border:0;border-radius:10px;background:var(--accent);color:#05101b;font-weight:700;cursor:pointer}
-  .meta{color:var(--muted);margin-top:10px}
+  label{display:block;color:#94a3b8;margin-bottom:6px}
+  input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #1f2937;background:#0b1220;color:#e5e7eb}
+  button{padding:10px 14px;border:0;border-radius:10px;background:#38bdf8;color:#05101b;font-weight:700;cursor:pointer}
+  .meta{color:#94a3b8;margin-top:10px}
   .pill{display:inline-flex;gap:8px;align-items:center;padding:6px 10px;background:#0b1220;border:1px solid #1f2937;border-radius:999px}
   .led{width:10px;height:10px;border-radius:50%;background:#ef4444}
   .led.ok{background:#22c55e}
   canvas{width:100%;height:64vh;display:block;background:#0b1220;border:1px solid #1f2937;border-radius:14px;margin-top:12px;cursor:grab}
   canvas.dragging{cursor:grabbing}
-  .legend{margin-top:8px;color:var(--muted);font-size:13px}
+  .legend{margin-top:8px;color:#94a3b8;font-size:13px}
   code{background:#0b1220;border:1px solid #1f2937;border-radius:6px;padding:0 6px}
   .list{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px}
   .chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid #1f2937;background:#0b1220;font-size:13px}
@@ -51,14 +51,14 @@
 
     <div class="meta" style="margin-top:8px">
       <span class="pill"><span class="led" id="led"></span><span id="st">Parado</span></span>
-      &nbsp;•&nbsp; Duplo-clique no canvas: reset de zoom • Scroll: zoom no cursor • Arraste um círculo para reposicioná-lo
+      • Duplo-clique: reset • Scroll: zoom no cursor • Arraste um círculo para reposicioná-lo
     </div>
 
     <canvas id="view" title="Scroll = zoom • Duplo-clique = reset"></canvas>
 
     <div class="legend">
-      Raio: <code>-30 dBm → maior</code> • <code>-100 dBm → menor</code>.  
-      Exemplo de resposta: <code>{"esp32s3_01":-48,"esp32s3_02":-43}</code>
+      Mapeamento ajustado para <b>−40…−90 dBm</b> com correção de escala log (dBm → potência).  
+      −40 dBm → raio maior • −90 dBm → raio menor. Payload esperado: <code>{"esp32s3_01":-48,"esp32s3_02":-43}</code>
     </div>
 
     <div class="list" id="chips"></div>
@@ -69,12 +69,15 @@
   // ====== Config ======
   const DEFAULT_ENDPOINT = "https://esp32ble-83c9a-default-rtdb.firebaseio.com/medicoes.json";
 
+  // ====== Intervalo de RSSI (dBm) e correção log ======
+  const RSSI_NEAR  = -40;   // mais forte (maior círculo)
+  const RSSI_FAR   = -90;   // mais fraco (menor círculo)
+  const GAMMA      = 0.6;   // <1 amplia diferenças; >1 comprime. Ajuste a gosto.
+
   // ====== Mapeamento de RSSI → Raio (unidades do mundo) ======
-  const RSSI_NEAR  = -30;
-  const RSSI_FAR   = -100;
-  const R_MIN_FRAC = 0.05;
-  const R_MAX_FRAC = 0.18;
-  const R_SMOOTH   = 0.15;
+  const R_MIN_FRAC = 0.05;  // 5% do menor lado (zoom=1)
+  const R_MAX_FRAC = 0.18;  // 18% do menor lado (zoom=1)
+  const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
 
   // ====== Cena (world) e view (canvas) ======
   const canvas = document.getElementById('view');
@@ -92,13 +95,12 @@
 
   const world = { zoom: 1, minZoom: 0.3, maxZoom: 4, originX: 0, originY: 0 };
 
-  // círculos por chave do JSON
   // key -> { x,y, rssi, rTarget, rCurrent, color, lastTs }
   const circles = new Map();
 
   let polling = false;
   let pollTimer = null;
-  let controller = null; // AbortController para cancelar fetch pendente
+  let controller = null;
 
   function setStatus(text, ok=false){ stEl.textContent = text; ledEl.className = "led" + (ok ? " ok" : ""); }
 
@@ -120,13 +122,25 @@
   }
   function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 
+  // ---- NOVO mapeamento com correção log (dBm → potência relativa) + gamma ----
   function mapRSSItoRadius(rssi){
     const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight);
     const rMin = R_MIN_FRAC * minSideScreen;
     const rMax = R_MAX_FRAC * minSideScreen;
+
+    // clamp em dBm
     const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
-    const t  = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR);
-    return rMin + t*(rMax - rMin); // unidades do mundo
+
+    // potência relativa normalizada (0…1) a partir do dBm:
+    // P_rel = 10^((rr - RSSI_FAR)/10) / 10^((RSSI_NEAR - RSSI_FAR)/10)
+    const pNear = Math.pow(10, (RSSI_NEAR - RSSI_FAR) / 10);   // constante
+    const pThis = Math.pow(10, (rr         - RSSI_FAR) / 10);
+    let t = pThis / pNear;   // 0..1 (linear em potência)
+
+    // gamma para “abrir” diferenças (GAMMA<1 realça variações em sinais fracos)
+    t = Math.pow(t, GAMMA);
+
+    return rMin + t*(rMax - rMin); // raio em unidades do mundo
   }
 
   function colorHSLA(seed){
@@ -256,23 +270,15 @@
 
   // ====== Polling Firebase ======
   async function pollOnce(endpoint){
-    if (controller) controller.abort(); // aborta requisição anterior se pendente
+    if (controller) controller.abort();
     controller = new AbortController();
     const signal = controller.signal;
 
     try{
-      const res = await fetch(endpoint, {
-        method: 'GET',
-        // dica: se usar token -> endpoint + '?auth=SEU_TOKEN'
-        headers: { 'Accept': 'application/json' },
-        signal
-      });
+      const res = await fetch(endpoint, { method:'GET', headers:{'Accept':'application/json'}, signal });
       if(!res.ok){ throw new Error(`HTTP ${res.status}`); }
       const data = await res.json(); // { key: rssi, ... }
       const now = Date.now();
-
-      // marca todos como não vistos neste ciclo
-      const seen = new Set();
 
       if (data && typeof data === 'object'){
         for (const [key, value] of Object.entries(data)) {
@@ -298,21 +304,12 @@
             c.rTarget = mapRSSItoRadius(rssi);
             c.lastTs = now;
           }
-          seen.add(key);
         }
       }
 
-      // opcional: se quiser remover chaves que sumiram imediatamente neste tick,
-      // descomente abaixo (senão o timeout de inatividade cuida):
-      // for (const key of Array.from(circles.keys())) {
-      //   if (!seen.has(key)) {
-      //     // não chegou no JSON atual; deixa o timeout decidir
-      //   }
-      // }
-
       setStatus(`OK • ${new Date().toLocaleTimeString()}`, true);
     }catch(err){
-      if (err.name === 'AbortError') return; // ignorado, vai reiniciar
+      if (err.name === 'AbortError') return;
       setStatus(`Erro: ${err.message}`, false);
     }finally{
       controller = null;
@@ -328,7 +325,6 @@
     setStatus("Conectando…", false);
     polling = true;
 
-    // dispara já
     pollOnce(endpoint);
     setStatus("Rodando (polling)", true);
 
@@ -347,9 +343,6 @@
     btnStart.textContent = polling ? "Parar" : "Iniciar";
   });
 
-  btnReset.addEventListener('click', ()=>{ world.zoom=1; world.originX=0; world.y=0; world.originY=0; });
-
-  // start automático com default
-  // startPolling();
+  btnReset.addEventListener('click', ()=>{ world.zoom=1; world.originX=0; world.originY=0; });
 </script>
 </html>
