@@ -2,23 +2,23 @@
 <html lang="pt-BR">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Multi-RSSI • Círculos com Zoom & Drag (Firebase RTDB)</title>
+<title>Multi-RSSI • Círculos com Zoom & Drag (MQTT/WSS • EMQX)</title>
 <style>
   :root{--bg:#0b1220;--panel:#0f172a;--text:#e5e7eb;--muted:#94a3b8;--accent:#38bdf8}
-  body{margin:0;background:#0b1220;color:#e5e7eb;font:15px/1.5 system-ui,Segoe UI,Roboto,Arial}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,Segoe UI,Roboto,Arial}
   .wrap{max-width:1100px;margin:32px auto;padding:20px}
-  .box{background:#0f172a;border:1px solid #1f2937;border-radius:14px;padding:16px}
-  .row{display:grid;grid-template-columns:1.4fr 1fr 1fr auto auto;gap:10px;align-items:end}
-  label{display:block;color:#94a3b8;margin-bottom:6px}
-  input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #1f2937;background:#0b1220;color:#e5e7eb}
-  button{padding:10px 14px;border:0;border-radius:10px;background:#38bdf8;color:#05101b;font-weight:700;cursor:pointer}
-  .meta{color:#94a3b8;margin-top:10px}
+  .box{background:var(--panel);border:1px solid #1f2937;border-radius:14px;padding:16px}
+  .row{display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end}
+  label{display:block;color:var(--muted);margin-bottom:6px}
+  input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #1f2937;background:#0b1220;color:var(--text)}
+  button{padding:10px 14px;border:0;border-radius:10px;background:var(--accent);color:#05101b;font-weight:700;cursor:pointer}
+  .meta{color:var(--muted);margin-top:10px}
   .pill{display:inline-flex;gap:8px;align-items:center;padding:6px 10px;background:#0b1220;border:1px solid #1f2937;border-radius:999px}
   .led{width:10px;height:10px;border-radius:50%;background:#ef4444}
   .led.ok{background:#22c55e}
   canvas{width:100%;height:64vh;display:block;background:#0b1220;border:1px solid #1f2937;border-radius:14px;margin-top:12px;cursor:grab}
   canvas.dragging{cursor:grabbing}
-  .legend{margin-top:8px;color:#94a3b8;font-size:13px}
+  .legend{margin-top:8px;color:var(--muted);font-size:13px}
   code{background:#0b1220;border:1px solid #1f2937;border-radius:6px;padding:0 6px}
   .list{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px}
   .chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid #1f2937;background:#0b1220;font-size:13px}
@@ -27,61 +27,59 @@
 
 <div class="wrap">
   <div class="box">
-    <h2 style="margin:0 0 8px">Círculos por RSSI (múltiplas chaves) • Zoom & Drag • Firebase RTDB</h2>
+    <h2 style="margin:0 0 8px">Círculos por RSSI (múltiplos tópicos) • Zoom no scroll & arrastar</h2>
     <div class="meta">
-      Endpoint: <code id="endpointLabel">https://esp32ble-83c9a-default-rtdb.firebaseio.com/medicoes.json</code>
+      Broker WSS: <code>wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt</code> • Filtro: <code>esp32/beacons/+/rssi_avg</code>
     </div>
 
     <div class="row" style="margin-top:12px">
       <div>
-        <label>Endpoint RTDB (.json)</label>
-        <input id="endpoint" value="https://esp32ble-83c9a-default-rtdb.firebaseio.com/medicoes.json">
+        <label>Usuário (EMQX)</label>
+        <input id="user" placeholder="ex.: esp32_card01" autocomplete="username">
       </div>
       <div>
-        <label>Intervalo de polling (ms)</label>
-        <input id="pollMs" type="number" value="1000" min="200">
+        <label>Senha (EMQX)</label>
+        <input id="pass" type="password" placeholder="••••••••" autocomplete="current-password">
       </div>
-      <div>
-        <label>Timeout inativo (ms)</label>
-        <input id="staleMs" type="number" value="7000" min="1000">
-      </div>
-      <button id="btnStart">Iniciar</button>
+      <button id="btn">Conectar</button>
       <button id="btnReset">Reset view</button>
     </div>
 
     <div class="meta" style="margin-top:8px">
-      <span class="pill"><span class="led" id="led"></span><span id="st">Parado</span></span>
-      • Duplo-clique: reset • Scroll: zoom no cursor • Arraste um círculo para reposicioná-lo
+      <span class="pill"><span class="led" id="led"></span><span id="st">Desconectado</span></span>
+      &nbsp;•&nbsp; Duplo-clique no canvas: reset de zoom • Scroll: zoom sob o cursor • Arraste um círculo para reposicioná-lo
+      • <b>Retidas têm carência de 20s</b> • Remoção por inatividade é dinâmica (3× intervalo médio, mín. 7s)
     </div>
 
     <canvas id="view" title="Scroll = zoom • Duplo-clique = reset"></canvas>
 
     <div class="legend">
-      Mapeamento ajustado para <b>−40…−90 dBm</b> com correção de escala log (dBm → potência).  
-      −40 dBm → raio maior • −90 dBm → raio menor. Payload esperado: <code>{"esp32s3_01":-48,"esp32s3_02":-43}</code>
+      Raio: <code>-30 dBm → maior</code> • <code>-100 dBm → menor</code>. Payload pode ser número puro ou JSON com <code>rssi_avg</code>.
     </div>
 
     <div class="list" id="chips"></div>
   </div>
 </div>
 
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <script>
-  // ====== Config ======
-  const DEFAULT_ENDPOINT = "https://esp32ble-83c9a-default-rtdb.firebaseio.com/medicoes.json";
+  // ====== MQTT / Tópicos ======
+  const WS_URL       = "wss://j6466600.ala.us-east-1.emqxsl.com:8084/mqtt";
+  const TOPIC_FILTER = "esp32/beacons/+/rssi_avg";
+  const KEEPALIVE    = 60;
 
+  // ====== Mapeamento de RSSI → Raio (unidades do mundo) ======
+  const RSSI_NEAR  = -30;
+  const RSSI_FAR   = -100;
+  const R_MIN_FRAC = 0.05;
+  const R_MAX_FRAC = 0.18;
+  const R_SMOOTH   = 0.15;
 
-  // ====== Intervalo de RSSI (dBm) — linear ======
-const RSSI_NEAR  = -40;   // mais forte (maior círculo)
-const RSSI_FAR   = -90;   // mais fraco (menor círculo)
-
-// ====== Ganho global de tamanho (ajuste “o quanto” quer ampliar) ======
-const SIZE_GAIN  = 2.35;  // 1.0 = sem ganho; 1.2~1.6 deixa mais visível
-
-// ====== Mapeamento de RSSI → Raio (linear, em UNIDADES DO MUNDO) ======
-const R_MIN_FRAC = 0.06;  // 6% do menor lado (baseline zoom=1)
-const R_MAX_FRAC = 0.26;  // 26% do menor lado (baseline zoom=1)
-const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
-
+  // ====== Inatividade (dinâmica) ======
+  const MIN_STALE_MS     = 7000;   // mínimo
+  const MAX_STALE_MS     = 60000;  // máximo de segurança
+  const STALE_FACTOR     = 3.0;    // N× intervalo médio
+  const RETAIN_GRACE_MS  = 20000;  // carência para mensagens só-retidas aguardarem um "vivo"
 
   // ====== Cena (world) e view (canvas) ======
   const canvas = document.getElementById('view');
@@ -89,26 +87,19 @@ const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
   const stEl   = document.getElementById('st');
   const ledEl  = document.getElementById('led');
   const chips  = document.getElementById('chips');
-  const btnStart = document.getElementById('btnStart');
+  const btn    = document.getElementById('btn');
   const btnReset = document.getElementById('btnReset');
-  const endpointInp = document.getElementById('endpoint');
-  const pollMsInp   = document.getElementById('pollMs');
-  const staleMsInp  = document.getElementById('staleMs');
 
-  document.getElementById('endpointLabel').textContent = DEFAULT_ENDPOINT;
+  let client = null;
 
   const world = { zoom: 1, minZoom: 0.3, maxZoom: 4, originX: 0, originY: 0 };
 
-  // key -> { x,y, rssi, rTarget, rCurrent, color, lastTs }
-  const circles = new Map();
-
-  let polling = false;
-  let pollTimer = null;
-  let controller = null;
+  // círculos por tópico (raios em mundo)
+  // adiciona: avgInterval (EWMA), lastLiveTs, retainedAt, live flag
+  const circles = new Map(); // topic -> {x,y,rssi,rTarget,rCurrent,color,lastLiveTs,avgInt,retainedAt,live}
 
   function setStatus(text, ok=false){ stEl.textContent = text; ledEl.className = "led" + (ok ? " ok" : ""); }
 
-  // ====== Canvas helpers ======
   function resizeCanvas(){
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const rect = canvas.getBoundingClientRect();
@@ -124,30 +115,21 @@ const R_SMOOTH   = 0.15;  // suavização do raio (0..1)
     const cy = sy - canvas.clientHeight/2;
     return { x: world.originX + cx/world.zoom, y: world.originY + cy/world.zoom };
   }
+  function worldToScreen(wx, wy){
+    const cx = (wx - world.originX)*world.zoom;
+    const cy = (wy - world.originY)*world.zoom;
+    return { x: canvas.clientWidth/2 + cx, y: canvas.clientHeight/2 + cy };
+  }
   function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 
-
-function mapRSSItoRadius(rssi){
-  const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight);
-  const baseMin = R_MIN_FRAC * minSideScreen;
-  const baseMax = R_MAX_FRAC * minSideScreen;
-
-  // clamp em dBm para o range desejado
-  const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
-
-  // mapeamento linear 0..1
-  const t  = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR);
-
-  // raio linear + ganho global
-  let r = baseMin + t * (baseMax - baseMin);
-  r *= SIZE_GAIN;
-
-  // (opcional) garantir limite superior após o ganho
-  const rMaxGain = baseMax * SIZE_GAIN;
-  r = clamp(r, baseMin, rMaxGain);
-
-  return r; // em unidades do MUNDO → cresce/encolhe com o zoom
-}
+  function mapRSSItoRadius(rssi){
+    const minSideScreen = Math.min(canvas.clientWidth, canvas.clientHeight);
+    const rMin = R_MIN_FRAC * minSideScreen;
+    const rMax = R_MAX_FRAC * minSideScreen;
+    const rr = clamp(rssi, RSSI_FAR, RSSI_NEAR);
+    const t  = (rr - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR);
+    return rMin + t*(rMax - rMin); // em mundo
+  }
 
   function colorHSLA(seed){
     let h=0; for(let i=0;i<seed.length;i++) h=(h*31+seed.charCodeAt(i))>>>0;
@@ -155,9 +137,9 @@ function mapRSSItoRadius(rssi){
     return `hsla(${hue},70%,55%,0.55)`; // semi-transparente
   }
 
-  function placeNewCircle(key){
+  function placeNewCircle(topic){
     const idx = circles.size;
-    const spacing = 140; // mundo
+    const spacing = 140; // em mundo
     const cols = Math.max(1, Math.floor((canvas.clientWidth/world.zoom)/spacing));
     const row  = Math.floor(idx/cols);
     const col  = idx%cols;
@@ -165,20 +147,20 @@ function mapRSSItoRadius(rssi){
     return { x: startX + col*spacing, y: -150 + row*spacing };
   }
 
-  function ensureChip(key,color){
-    const id="chip-"+key.replace(/[^a-z0-9_-]/gi,'_');
+  function ensureChip(topic,color){
+    const id="chip-"+topic.replace(/[^a-z0-9_-]/gi,'_');
     if(document.getElementById(id)) return;
     const chip=document.createElement('div'); chip.className='chip'; chip.id=id;
     const d=document.createElement('span'); d.className='dot'; d.style.background=color;
-    const t=document.createElement('span'); t.textContent=key;
+    const t=document.createElement('span'); t.textContent=topic;
     chip.appendChild(d); chip.appendChild(t); chips.appendChild(chip);
   }
-  function removeChip(key){
-    const id="chip-"+key.replace(/[^a-z0-9_-]/gi,'_');
+  function removeChip(topic){
+    const id="chip-"+topic.replace(/[^a-z0-9_-]/gi,'_');
     const el=document.getElementById(id); if(el&&el.parentNode) el.parentNode.removeChild(el);
   }
 
-  // ====== Interação ======
+  // zoom no scroll
   canvas.addEventListener('wheel', (e)=>{
     e.preventDefault();
     const delta = -Math.sign(e.deltaY)*0.12;
@@ -193,57 +175,54 @@ function mapRSSItoRadius(rssi){
     world.originY += (before.y - after.y);
   }, {passive:false});
 
+  // reset view
   canvas.addEventListener('dblclick', ()=>{ world.zoom=1; world.originX=0; world.originY=0; });
 
+  // drag de círculos
   let dragging=null;
   canvas.addEventListener('mousedown',(e)=>{
     const rect=canvas.getBoundingClientRect();
     const p=screenToWorld(e.clientX-rect.left, e.clientY-rect.top);
     let pick=null, best=Infinity;
-    for(const [key,c] of circles){
+    for(const [topic,c] of circles){
       const d2=(p.x-c.x)**2+(p.y-c.y)**2;
-      if(d2<=c.rCurrent**2 && d2<best){ pick={key,c}; best=d2; }
+      if(d2<=c.rCurrent**2 && d2<best){ pick={topic,c}; best=d2; }
     }
-    if(pick){ dragging={key:pick.key, dx:p.x-pick.c.x, dy:p.y-pick.c.y}; canvas.classList.add('dragging');}
+    if(pick){ dragging={topic:pick.topic, dx:p.x-pick.c.x, dy:p.y-pick.c.y}; canvas.classList.add('dragging');}
   });
   window.addEventListener('mousemove',(e)=>{
     if(!dragging) return;
     const rect=canvas.getBoundingClientRect();
     const p=screenToWorld(e.clientX-rect.left, e.clientY-rect.top);
-    const c=circles.get(dragging.key); if(c){ c.x=p.x-dragging.dx; c.y=p.y-dragging.dy; }
+    const c=circles.get(dragging.topic); if(c){ c.x=p.x-dragging.dx; c.y=p.y-dragging.dy; }
   });
   window.addEventListener('mouseup', ()=>{ dragging=null; canvas.classList.remove('dragging'); });
 
-  // ====== Render + limpeza ======
-  function drawGrid(w,h){
-    const step=100;
-    const left  = world.originX - w/(2*world.zoom);
-    const right = world.originX + w/(2*world.zoom);
-    const top   = world.originY - h/(2*world.zoom);
-    const bot   = world.originY + h/(2*world.zoom);
-    const sx=Math.floor(left/step)*step, ex=Math.ceil(right/step)*step;
-    const sy=Math.floor(top/step)*step,  ey=Math.ceil(bot/step)*step;
-
-    ctx.lineWidth=1/world.zoom;
-    ctx.strokeStyle="rgba(148,163,184,0.1)";
-    ctx.beginPath();
-    for(let x=sx;x<=ex;x+=step){ ctx.moveTo(x,top); ctx.lineTo(x,bot); }
-    for(let y=sy;y<=ey;y+=step){ ctx.moveTo(left,y); ctx.lineTo(right,y); }
-    ctx.stroke();
-  }
-
+  // render + limpeza estável
   function render(){
     const w=canvas.clientWidth, h=canvas.clientHeight;
     ctx.clearRect(0,0,w,h);
 
-    // limpeza por inatividade
-    const now = Date.now();
-    const staleMs = Number(staleMsInp.value || 7000);
-    const del=[];
-    for(const [key,c] of circles){
-      if(now - c.lastTs > staleMs){ del.push(key); }
+    const now=Date.now(), del=[];
+    for(const [topic,c] of circles){
+      // define limiar dinâmico
+      const avg = c.avgInt ?? MIN_STALE_MS;
+      const dyn = clamp(avg*STALE_FACTOR, MIN_STALE_MS, MAX_STALE_MS);
+
+      // se só temos retained (ainda sem "live"), segura por RETAIN_GRACE_MS
+      if (!c.live) {
+        if (c.retainedAt && (now - c.retainedAt) > RETAIN_GRACE_MS) {
+          del.push(topic);
+        }
+        continue; // não desenha? (opção) — aqui vamos desenhar mesmo assim:
+      } else {
+        if ((now - c.lastLiveTs) > dyn) {
+          del.push(topic);
+        }
+      }
     }
-    for(const k of del){ circles.delete(k); removeChip(k); }
+    // remove os que passaram do limite
+    for(const t of del){ circles.delete(t); removeChip(t); }
 
     ctx.save();
     ctx.translate(w/2, h/2);
@@ -252,7 +231,7 @@ function mapRSSItoRadius(rssi){
 
     drawGrid(w,h);
 
-    for(const [key,c] of circles){
+    for(const [topic,c] of circles){
       c.rCurrent += (c.rTarget - c.rCurrent)*R_SMOOTH;
 
       ctx.beginPath();
@@ -265,7 +244,7 @@ function mapRSSItoRadius(rssi){
 
       ctx.fillStyle = "rgba(229,231,235,0.9)";
       ctx.font = `${14/world.zoom}px system-ui,Segoe UI,Roboto,Arial`;
-      const label = `${key} • ${c.rssi} dBm`;
+      const label = `${topic.split('/').slice(-3,-1).join('/')} • ${c.rssi} dBm` + (c.live ? "" : " (retido)");
       ctx.fillText(label, c.x + 10/world.zoom, c.y - 10/world.zoom);
     }
 
@@ -274,81 +253,84 @@ function mapRSSItoRadius(rssi){
   }
   requestAnimationFrame(render);
 
-  // ====== Polling Firebase ======
-  async function pollOnce(endpoint){
-    if (controller) controller.abort();
-    controller = new AbortController();
-    const signal = controller.signal;
+  function drawGrid(w,h){
+    const step=100;
+    const left=world.originX - w/(2*world.zoom);
+    const right=world.originX + w/(2*world.zoom);
+    const top=world.originY - h/(2*world.zoom);
+    const bottom=world.originY + h/(2*world.zoom);
+    const sx=Math.floor(left/step)*step, ex=Math.ceil(right/step)*step;
+    const sy=Math.floor(top/step)*step,  ey=Math.ceil(bottom/step)*step;
 
-    try{
-      const res = await fetch(endpoint, { method:'GET', headers:{'Accept':'application/json'}, signal });
-      if(!res.ok){ throw new Error(`HTTP ${res.status}`); }
-      const data = await res.json(); // { key: rssi, ... }
-      const now = Date.now();
+    ctx.lineWidth=1/world.zoom;
+    ctx.strokeStyle="rgba(148,163,184,0.1)";
+    ctx.beginPath();
+    for(let x=sx;x<=ex;x+=step){ ctx.moveTo(x,top); ctx.lineTo(x,bottom); }
+    for(let y=sy;y<=ey;y+=step){ ctx.moveTo(left,y); ctx.lineTo(right,y); }
+    ctx.stroke();
+  }
 
-      if (data && typeof data === 'object'){
-        for (const [key, value] of Object.entries(data)) {
-          const rssi = Number(value);
-          if (Number.isNaN(rssi)) continue;
+  // MQTT
+  function parsePayload(buf){
+    let txt=new TextDecoder().decode(buf).trim();
+    let num=Number(txt);
+    if(!Number.isNaN(num)) return num;
+    try{ const o=JSON.parse(txt); if(typeof o==='number') return o; if(typeof o.rssi_avg==='number') return o.rssi_avg; }catch(e){}
+    return null;
+  }
 
-          let c = circles.get(key);
-          if (!c) {
-            const pos = placeNewCircle(key);
-            const color = colorHSLA(key);
-            c = {
-              x: pos.x, y: pos.y,
-              rssi,
-              rTarget: mapRSSItoRadius(rssi),
-              rCurrent: 2,
-              color,
-              lastTs: now
-            };
-            circles.set(key, c);
-            ensureChip(key, color);
-          } else {
-            c.rssi = rssi;
-            c.rTarget = mapRSSItoRadius(rssi);
-            c.lastTs = now;
-          }
+  function onMsg(topic, payload, packet){
+    const rssi=parsePayload(payload); if(rssi==null) return;
+    const isRetained = !!(packet && packet.retain);
+    const now = Date.now();
+
+    let c=circles.get(topic);
+    if(!c){
+      const color=colorHSLA(topic);
+      const pos=placeNewCircle(topic);
+      c={
+        x:pos.x, y:pos.y,
+        rssi,
+        rTarget:mapRSSItoRadius(rssi),
+        rCurrent:2,
+        color,
+        live: !isRetained,
+        lastLiveTs: isRetained ? undefined : now,
+        retainedAt: isRetained ? now : undefined,
+        avgInt: undefined
+      };
+      circles.set(topic,c); ensureChip(topic,color);
+    }else{
+      // atualiza estatística de intervalo apenas para mensagens "ao vivo"
+      if (!isRetained) {
+        if (c.lastLiveTs) {
+          const dt = now - c.lastLiveTs;
+          const alpha = 0.2; // EWMA
+          c.avgInt = (c.avgInt==null) ? dt : (alpha*dt + (1-alpha)*c.avgInt);
         }
+        c.lastLiveTs = now;
+        c.live = true;
+        c.retainedAt = undefined;
       }
-
-      setStatus(`OK • ${new Date().toLocaleTimeString()}`, true);
-    }catch(err){
-      if (err.name === 'AbortError') return;
-      setStatus(`Erro: ${err.message}`, false);
-    }finally{
-      controller = null;
+      c.rssi = rssi;
+      c.rTarget = mapRSSItoRadius(rssi);
     }
   }
 
-  function startPolling(){
-    const endpoint = (endpointInp.value || DEFAULT_ENDPOINT).trim();
-    const pollMs   = Math.max(200, Number(pollMsInp.value || 1000));
-
-    if (polling) { stopPolling(); }
-
-    setStatus("Conectando…", false);
-    polling = true;
-
-    pollOnce(endpoint);
-    setStatus("Rodando (polling)", true);
-
-    pollTimer = setInterval(()=> pollOnce(endpoint), pollMs);
+  function connect(){
+    const username=document.getElementById('user').value.trim();
+    const password=document.getElementById('pass').value;
+    if(!username||!password){ alert("Informe usuário e senha do EMQX."); return; }
+    if(client){ try{client.end(true);}catch(e){} client=null; }
+    setStatus("Conectando…",false);
+    client=mqtt.connect(WS_URL,{username,password,clean:true,keepalive:KEEPALIVE,reconnectPeriod:2000,connectTimeout:20000,clientId:'web-'+Math.random().toString(16).slice(2),protocolVersion:4});
+    client.on('connect',()=>{ setStatus("Conectado",true); client.subscribe(TOPIC_FILTER,{qos:0},(err,g)=>{ setStatus(err?"Falha ao assinar":"Assinado: "+g.map(x=>x.topic).join(', '), !err); }); });
+    client.on('reconnect',()=>setStatus("Reconectando…",false));
+    client.on('close',()=>setStatus("Desconectado",false));
+    client.on('error',e=>setStatus("Erro: "+(e?.message||e),false));
+    client.on('message', onMsg);
   }
-
-  function stopPolling(){
-    polling = false;
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    if (controller) { controller.abort(); controller = null; }
-    setStatus("Parado", false);
-  }
-
-  btnStart.addEventListener('click', ()=>{
-    if (!polling) startPolling(); else stopPolling();
-    btnStart.textContent = polling ? "Parar" : "Iniciar";
-  });
-
+  document.getElementById('btn').addEventListener('click', connect);
   btnReset.addEventListener('click', ()=>{ world.zoom=1; world.originX=0; world.originY=0; });
 </script>
 </html>
